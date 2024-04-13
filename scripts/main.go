@@ -12,7 +12,7 @@ import (
 
 const (
 	filePrefix      = "measurements"
-	dataDirectory   = "temp"
+	dataDirectory   = "../temp"
 	retryLimit      = 3
 	decreaseFactor  = 2
 	minIncrement    = 1
@@ -21,7 +21,7 @@ const (
 
 func init() {
 	if err := godotenv.Load(); err != nil {
-		Error("Error loading .env file")
+		logError("Error loading .env file")
 	}
 }
 
@@ -32,44 +32,111 @@ func connectDB() *sql.DB {
 
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
-		Error("Failed to connect to database: %v", err)
+		logError("Failed to connect to database: %v", err)
 		return nil
 	}
-	Info("Successfully connected to the database.")
+	logSuccess("Successfully connected to the database.")
 	return db
 }
 
 func executeQuery(db *sql.DB, condition string, fileSuffix string) bool {
-	query := fmt.Sprintf(`SELECT device_id, unit, location, height, captured_at::date AS measurement_day, AVG(value) AS average_value FROM public.measurements WHERE %s GROUP BY device_id, unit, location, height, measurement_day ORDER BY device_id;`, condition)
+	query := fmt.Sprintf(`
+		SELECT device_id, unit, location, height, captured_at::date AS measurement_day, AVG(value) AS average_value 
+		FROM public.measurements 
+		WHERE %s AND (device_id IS NOT NULL OR height IS NOT NULL)
+		GROUP BY device_id, unit, location, height, measurement_day 
+		ORDER BY measurement_day;`, 
+		condition)
 	rows, err := db.Query(query)
 	if err != nil {
-		Error("Failed to execute query: %v", err)
+		logError("Failed to execute query: %v", err)
 		return false
 	}
 	defer rows.Close()
 
-	if rows.Next() {
-		fileName := fmt.Sprintf("%s/%s_%s.csv", dataDirectory, filePrefix, fileSuffix)
-		Info("Results saved to %s.", fileName)
-		return true
-	} else {
-		Info("No data to save.")
-		return true
+	var data [][]string
+	headers := []string{"Device ID", "Unit", "Location", "Height", "Measurement Day", "Average Value"}
+	for rows.Next() {
+		var (
+			deviceID       sql.NullInt64
+			unit, location sql.NullString
+			height         sql.NullFloat64
+			measurementDay sql.NullTime
+			averageValue   sql.NullFloat64
+		)
+		if err := rows.Scan(&deviceID, &unit, &location, &height, &measurementDay, &averageValue); err != nil {
+			logError("Failed to scan row: %v", err)
+			return false
+		}
+		record := []string{
+			nullInt64ToString(deviceID),
+			nullStringToString(unit),
+			nullStringToString(location),
+			nullFloat64ToString(height),
+			nullTimeToString(measurementDay),
+			nullFloat64ToString(averageValue),
+		}
+		data = append(data, record)
 	}
+
+	if len(data) > 0 {
+			if err := writeCSV(data, headers, fileSuffix); err != nil {
+					return false
+			}
+	} else {
+			logInfo("No data found for the current query.")
+	}
+
+	return true
 }
 
-func main() {
-	startDate := time.Date(2014, 12, 6, 0, 0, 0, 0, time.UTC)
-	interval := initialIncrement
-	currentDate := startDate
+// Helper functions to convert SQL null types to strings
+func nullStringToString(ns sql.NullString) string {
+	if ns.Valid {
+		return ns.String
+	}
+	return ""
+}
 
+func nullInt64ToString(ni sql.NullInt64) string {
+	if ni.Valid {
+		return fmt.Sprintf("%d", ni.Int64)
+	}
+	return ""
+}
+
+func nullFloat64ToString(nf sql.NullFloat64) string {
+	if nf.Valid {
+		return fmt.Sprintf("%.2f", nf.Float64)
+	}
+	return ""
+}
+
+func nullTimeToString(nt sql.NullTime) string {
+	if nt.Valid {
+		return nt.Time.Format("2006-01-02")
+	}
+	return ""
+}
+
+
+func main() {
 	db := connectDB()
+	if db == nil {
+		return
+	}
 	defer db.Close()
+
+	startDate := time.Date(2010, 1, 1, 0, 0, 0, 0, time.UTC)
+	currentDate := startDate
+	interval := initialIncrement
 
 	for currentDate.Before(time.Now()) {
 		nextDate := currentDate.AddDate(0, 0, interval)
 		condition := fmt.Sprintf("captured_at BETWEEN '%s' AND '%s'", currentDate.Format("2006-01-02"), nextDate.Format("2006-01-02"))
 		fileSuffix := fmt.Sprintf("%s_to_%s", currentDate.Format("2006-01-02"), nextDate.Format("2006-01-02"))
+
+		logInfo("Executing query for interval: %s to %s", currentDate.Format("2006-01-02"), nextDate.Format("2006-01-02"))
 
 		retries := retryLimit
 		for retries > 0 {
@@ -77,14 +144,18 @@ func main() {
 				break
 			}
 			retries--
-			Warn("Retrying... %d retries left.", retries)
-			if retries == 0 && interval > minIncrement {
-				interval = max(interval/decreaseFactor, minIncrement)
-				Warn("Reducing interval due to errors. New interval: %d", interval)
-				retries = retryLimit
+			logWarning("Retrying... %d retries left.", retries)
+			if retries == 0 {
+				if interval > minIncrement {
+					interval = max(interval/decreaseFactor, minIncrement)
+					logWarning("Reducing interval due to errors. New interval: %d", interval)
+					retries = retryLimit
+				} else {
+					logError("Failed to execute query after multiple retries at minimum interval. Exiting loop.")
+					return
+				}
 			}
 		}
-
 		currentDate = nextDate
 	}
 }
