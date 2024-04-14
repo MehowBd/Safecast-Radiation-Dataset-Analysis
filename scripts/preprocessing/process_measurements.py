@@ -78,7 +78,7 @@ def merge_close_measurements(group, device_id, measurement_day, height):
         avg_lon = sum(row['Longitude'] for row in close_rows) / len(close_rows)
         avg_value = sum(row['Average Value'] for row in close_rows) / len(close_rows)
         result.append({
-            'ID': device_id,
+            'Device ID': device_id,
             'Unit': close_rows[0]['Unit'],
             'Latitude': avg_lat,
             'Longitude': avg_lon,
