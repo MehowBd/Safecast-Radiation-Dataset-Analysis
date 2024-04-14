@@ -138,6 +138,6 @@ ui-tests/.pnp.*
 
 # Custom
 .idea/
-/data
+data/chunks/
 .env
 temp/
