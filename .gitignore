@@ -137,4 +137,7 @@ ui-tests/.yarn/*
 ui-tests/.pnp.*
 
 # Custom
-data/
+.idea/
+data/chunks/
+.env
+temp/
