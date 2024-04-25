@@ -5,6 +5,7 @@ import numpy as np
 from geopy.distance import geodesic
 from shapely import wkb
 from logger import setup_logger
+import requests
 
 # Directory and file configuration
 IN_DIR = 'data/chunks'
@@ -101,6 +102,23 @@ def save_processed_data(df):
     with open(OUT_FILE, 'a', newline='') as f:  # Ensure the file is opened without additional newline characters
         df.to_csv(f, header=f.tell()==0, index=False)
     logger.info(f"Saved {len(df)} records to output.")
+
+def get_elevation(lat, lon):
+    url = f"https://maps.googleapis.com/maps/api/elevation/json?locations={lat},{lon}&key=YOUR_API_KEY"
+    response = requests.get(url)
+    data = response.json()
+    if data['status'] == 'OK':
+        return data['results'][0]['elevation']
+    else:
+        return None
+
+def get_missing_elevation(df):
+    for index, row in df.iterrows():
+        if pd.isna(row['height']):
+            lat, lon = row['latitude'], row['longitude']
+            if pd.notna(lat) and pd.notna(lon):
+                height = get_elevation(lat, lon)
+                df.at[index, 'height'] = height
 
 if __name__ == '__main__':
     read_and_process_files()
