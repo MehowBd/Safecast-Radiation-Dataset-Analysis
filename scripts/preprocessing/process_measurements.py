@@ -103,22 +103,29 @@ def save_processed_data(df):
         df.to_csv(f, header=f.tell()==0, index=False)
     logger.info(f"Saved {len(df)} records to output.")
 
-def get_elevation(lat, lon):
-    url = f"https://maps.googleapis.com/maps/api/elevation/json?locations={lat},{lon}&key=YOUR_API_KEY"
-    response = requests.get(url)
-    data = response.json()
-    if data['status'] == 'OK':
-        return data['results'][0]['elevation']
-    else:
-        return None
+import requests
 
-def get_missing_elevation(df):
-    for index, row in df.iterrows():
-        if pd.isna(row['height']):
-            lat, lon = row['latitude'], row['longitude']
-            if pd.notna(lat) and pd.notna(lon):
-                height = get_elevation(lat, lon)
-                df.at[index, 'height'] = height
+def get_elevation(lat, lon):
+    url = f"https://maps.googleapis.com/maps/api/elevation/json?locations={lat},{lon}"
+    response = requests.get(url)
+    if response.status_code == 200:
+        data = response.json()
+        if data['status'] == 'OK' and 'results' in data:
+            elevation_result = data['results'][0]
+            return elevation_result['elevation']
+    return None
+
+def fill_missing_height(df):
+    missing_height = df['Height'].isna() & df['Latitude'].notna() & df['Longitude'].notna()
+
+    missing_indices = df.index[missing_height]
+
+    for index in missing_indices:
+        lat, lon = df.at[index, 'Latitude'], df.at[index, 'Longitude']
+        height = get_elevation(lat, lon)
+        if height is not None:
+            df.at[index, 'Height'] = height
+
 
 if __name__ == '__main__':
     read_and_process_files()
