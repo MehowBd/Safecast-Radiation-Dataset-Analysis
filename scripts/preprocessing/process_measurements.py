@@ -106,7 +106,8 @@ def save_processed_data(df):
 import requests
 
 def get_elevation(lat, lon):
-    url = f"https://maps.googleapis.com/maps/api/elevation/json?locations={lat},{lon}"
+    api_key = 'YOUR_API_KEY'
+    url = f"https://maps.googleapis.com/maps/api/elevation/json?locations={lat},{lon}&key={api_key}"
     response = requests.get(url)
     if response.status_code == 200:
         data = response.json()
