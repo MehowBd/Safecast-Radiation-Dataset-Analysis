@@ -105,25 +105,23 @@ def save_processed_data(df):
 
 import requests
 
-def get_elevation(lat, lon):
-    api_key = 'YOUR_API_KEY'
-    url = f"https://maps.googleapis.com/maps/api/elevation/json?locations={lat},{lon}&key={api_key}"
-    response = requests.get(url)
-    if response.status_code == 200:
-        data = response.json()
-        if data['status'] == 'OK' and 'results' in data:
-            elevation_result = data['results'][0]
-            return elevation_result['elevation']
-    return None
+def get_elevation(lat, long):
+    try:
+        query = f'https://api.open-elevation.com/api/v1/lookup?locations={lat},{long}'
+        response = requests.get(query).json()
+        elevation = response[0]['elevation']
+        return elevation
+    except (KeyError, IndexError):
+        return None
+    except JSONDecodeError:
+        print("Error: Unable to decode JSON response. The API might be down or returning unexpected data.")
+        return None
 
 def fill_missing_height(df):
-    missing_height = df['Height'].isna() & df['Latitude'].notna() & df['Longitude'].notna()
-
-    missing_indices = df.index[missing_height]
-
-    for index in missing_indices:
-        lat, lon = df.at[index, 'Latitude'], df.at[index, 'Longitude']
-        height = get_elevation(lat, lon)
+    missing_height_rows = df[pd.isnull(df['Height'])]
+    for index, row in missing_hseight_rows.iterrows():
+        lat, lon = row['Latitude'], row['Longitude']
+        height = get_elevation(lat = lat, long = lon)
         if height is not None:
             df.at[index, 'Height'] = height
 
