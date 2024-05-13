@@ -5,126 +5,100 @@ import numpy as np
 from geopy.distance import geodesic
 from shapely import wkb
 from logger import setup_logger
-import requests
 
 # Directory and file configuration
 IN_DIR = 'data/chunks'
 FILE_PATTERN = 'measurements_*.csv'
 OUT_DIR = 'data'
-OUT_FILE = os.path.join(OUT_DIR, 'measurements_daily.csv')
-# meters (GPS accuracy is 10-20 meters but keep a margin of error in case the
-# sensor was moved to another location)
-DISTANCE_THRESHOLD = 1000  
+OUT_FILE_NAME = 'measurements_preprocessed.csv'
+
+GPS_ACCURACY_THRESHOLD = 20  # meters
+HEIGHT_MOVEMENT_THRESHOLD = 5  # meters for height changes
 
 logger = setup_logger()
 
-def read_and_process_files():
-    # Prepare output file
-    if os.path.exists(OUT_FILE):
-        os.remove(OUT_FILE)
-
+def read_chunks(log_every=10):
     files = glob.glob(os.path.join(IN_DIR, FILE_PATTERN))
-    for file in files:
-        logger.info(f"Reading file: {file}")
-        data = pd.read_csv(file)
-        logger.info(f"Read {len(data)} records")
-        processed_data = process_data(data)
-        save_processed_data(processed_data)
-        logger.success(f"Processed and saved data from {file}")
+    chunks = []
+    total_files = len(files)
+    
+    for i, file in enumerate(files):
+        chunk = pd.read_csv(file)
+        chunks.append(chunk)
+        
+        if i % log_every == 0 and i != 0:
+            logger.info(f"Processed {i} of {total_files} files.")
+        
+    all_data = pd.concat(chunks, ignore_index=True)
+    logger.success(f"All chunks read. Total files processed: {total_files}. Total measurements: {len(all_data)}.")
+    return all_data
 
 def process_data(df):
-    # Decode WKB format and extract latitude and longitude
     df['Location'] = df['Location'].apply(lambda x: wkb.loads(bytes.fromhex(x)))
     df['Latitude'] = df['Location'].apply(lambda x: x.y)
     df['Longitude'] = df['Location'].apply(lambda x: x.x)
 
-    # Handle missing 'Height' values by replacing them with a default placeholder -np.inf
-    df['Height'].fillna(-np.inf, inplace=True)
+    # Handle non-finite 'Device ID' values
+    if df['Device ID'].isnull().any() or np.isinf(df['Device ID']).any():
+        logger.warning("Incorrect 'Device ID' values found. Removing affected rows.")
+        df = df.dropna(subset=['Device ID'])  # Adjust according to your data handling policy
 
-    # Group data and process
-    grouped = df.groupby(['Device ID', 'Measurement Day', 'Height'])
-    processed_list = []
+    # Convert Device ID to integer and set as index
+    df.loc[:, 'Device ID'] = df['Device ID'].astype(int)
+    df.set_index('Device ID', inplace=True)
 
-    for (device_id, measurement_day, height), group in grouped:
-        processed_group = merge_close_measurements(group, device_id, measurement_day, height)
-        processed_list.append(processed_group)
+    aggregated_data = df.groupby(['Device ID', 'Measurement Day']).agg({
+        'Unit': 'first',  # Assuming 'Unit' doesn't change daily per device
+        'Latitude': 'median',
+        'Longitude': 'median',
+        'Height': 'median',
+        'Average Value': 'mean'
+    }).reset_index()
 
-    # Check if processed_list is empty
-    if processed_list:
-        return pd.concat(processed_list, ignore_index=True)
-    else:
-        logger.warning("No data to process after grouping. Returning an empty DataFrame.")
-        return pd.DataFrame()
+    # Temporary columns for movement calculations
+    aggregated_data['Prev Latitude'] = aggregated_data.groupby('Device ID')['Latitude'].shift(1)
+    aggregated_data['Prev Longitude'] = aggregated_data.groupby('Device ID')['Longitude'].shift(1)
+    aggregated_data['Prev Height'] = aggregated_data.groupby('Device ID')['Height'].shift(1)
 
+    # Calculate movement and height difference
+    aggregated_data['Movement'] = aggregated_data.apply(
+        lambda row: geodesic((row['Prev Latitude'], row['Prev Longitude']), (row['Latitude'], row['Longitude'])).meters if pd.notnull(row['Prev Latitude']) else 0,
+        axis=1
+    )
+    aggregated_data['Height Difference'] = (aggregated_data['Height'] - aggregated_data['Prev Height']).abs()
 
-def merge_close_measurements(group, device_id, measurement_day, height):
-    # Use a temporary data structure to hold results
-    result = []
-    visited = set()
+    # Determine status with height difference handling
+    aggregated_data['Status'] = aggregated_data.apply(
+        lambda row: 'Moving' if row['Movement'] > GPS_ACCURACY_THRESHOLD or (row['Height Difference'] > HEIGHT_MOVEMENT_THRESHOLD and pd.notnull(row['Height Difference'])) else 'Stationary',
+        axis=1
+    )
 
-    for i, row1 in group.iterrows():
-        if i in visited:
-            continue
-        close_rows = [row1]
-        for j, row2 in group.iterrows():
-            if j <= i or j in visited:
-                continue
-            dist = geodesic((row1['Latitude'], row1['Longitude']), (row2['Latitude'], row2['Longitude'])).meters
-            if dist < DISTANCE_THRESHOLD:
-                close_rows.append(row2)
-                visited.add(j)
+    # Remove temporary calculation columns before final output
+    final_data = aggregated_data.drop(columns=['Prev Latitude', 'Prev Longitude', 'Prev Height', 'Movement', 'Height Difference'])
 
-        # Calculate average values for close measurements
-        avg_lat = sum(row['Latitude'] for row in close_rows) / len(close_rows)
-        avg_lon = sum(row['Longitude'] for row in close_rows) / len(close_rows)
-        avg_value = sum(row['Average Value'] for row in close_rows) / len(close_rows)
-        result.append({
-            'Device ID': device_id,
-            'Unit': close_rows[0]['Unit'],
-            'Latitude': avg_lat,
-            'Longitude': avg_lon,
-            'Height': height,
-            'Measurement Day': measurement_day,
-            'Average Value': avg_value
-        })
+    logger.success("Movement calculation and status assignment completed.")
+    return smooth_status(final_data)
 
-        for row in close_rows:
-            visited.add(row.name)
+def smooth_status(df):
+    for device_id, group in df.groupby('Device ID'):
+        statuses = group['Status'].values
+        for i in range(1, len(statuses) - 1):
+            if statuses[i-1] == statuses[i+1] and statuses[i] != statuses[i-1]:
+                statuses[i] = statuses[i-1]
+        df.loc[group.index, 'Status'] = statuses
+        logger.info(f"Status smoothed for Device ID {device_id}")
 
-    return pd.DataFrame(result)
+    logger.success("Status smoothing completed for all devices.")
+    return df
 
-def save_processed_data(df):
-    # Replace -np.inf with NaN in the 'Height' column before saving
-    df['Height'].replace(-np.inf, pd.NA, inplace=True)
+def save_results(df):
+    results_file_path = os.path.join(OUT_DIR, OUT_FILE_NAME)
+    df.to_csv(results_file_path, index=False)
+    logger.success(f"Results saved to {results_file_path}")
 
-    # Sort data by date and save
-    df.sort_values(by=['Measurement Day'], inplace=True)
-    with open(OUT_FILE, 'a', newline='') as f:  # Ensure the file is opened without additional newline characters
-        df.to_csv(f, header=f.tell()==0, index=False)
-    logger.info(f"Saved {len(df)} records to output.")
-
-import requests
-
-def get_elevation(lat, long):
-    try:
-        query = f'https://api.open-elevation.com/api/v1/lookup?locations={lat},{long}'
-        response = requests.get(query).json()
-        elevation = response[0]['elevation']
-        return elevation
-    except (KeyError, IndexError):
-        return None
-    except JSONDecodeError:
-        print("Error: Unable to decode JSON response. The API might be down or returning unexpected data.")
-        return None
-
-def fill_missing_height(df):
-    missing_height_rows = df[pd.isnull(df['Height'])]
-    for index, row in missing_hseight_rows.iterrows():
-        lat, lon = row['Latitude'], row['Longitude']
-        height = get_elevation(lat = lat, long = lon)
-        if height is not None:
-            df.at[index, 'Height'] = height
-
-
-if __name__ == '__main__':
-    read_and_process_files()
+if __name__ == "__main__":
+    logger.info("Starting data processing...")
+    df = read_chunks()
+    processed_df = process_data(df)
+    save_results(processed_df)
+    logger.success("Data processing completed successfully.")
